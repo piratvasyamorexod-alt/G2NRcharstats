@@ -3,10 +3,25 @@
 #include <algorithm>
 #include <array>
 #include <string>
-#include <string_view>
+#include <utility>
 #include <vector>
 
 namespace CharStats {
+
+inline bool VisibleOnPage(bool nativeVisible, int hideOnPage, int page) {
+    return hideOnPage == 0 || hideOnPage == 1 ? page != hideOnPage : nativeVisible;
+}
+
+inline int PanelMargin(int screenHeight) { return std::clamp(screenHeight / 46, 12, 29); }
+inline int LineHeight(int fontHeight) { return (std::max)(12, fontHeight) + 4; }
+
+inline std::pair<int, int> PanelSize(int screenWidth, int screenHeight, int fontHeight, int rows) {
+    const int margin = PanelMargin(screenHeight);
+    const int line = LineHeight(fontHeight);
+    const int width = (std::min)(screenWidth * 92 / 100, screenHeight * 98 / 100);
+    const int height = (std::min)(screenHeight * 70 / 100, 3 * margin + 2 + (rows + 1) * line);
+    return {width, height};
+}
 
 struct Cell {
     int x, y;

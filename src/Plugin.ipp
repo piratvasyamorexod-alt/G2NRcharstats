@@ -11,10 +11,11 @@ namespace {
 using CharStats::Cell;
 using CharStats::Pane;
 
-constexpr unsigned long TextInk = 0xFFE0CDA4;
-constexpr unsigned long ValueInk = 0xFFF1DDB3;
-constexpr unsigned long BronzeInk = 0xFFD6AC70;
-constexpr unsigned long LineInk = 0xFF63533D;
+constexpr unsigned long TextInk = 0xFFF0DFBB;
+constexpr unsigned long ValueInk = 0xFFFFEAC4;
+constexpr unsigned long BronzeInk = 0xFFDDB67D;
+constexpr unsigned long LineInk = 0xFF655740;
+constexpr unsigned short StatusLogicalKey = 0x14; // Used by the native status menu.
 
 struct Box {
     int left = 0, top = 0, right = 0, bottom = 0;
@@ -26,30 +27,49 @@ struct Box {
     bool operator==(const Box&) const = default;
 };
 
-bool IsStatusMenu(zCMenu* menu) {
-    return menu && !std::strcmp(menu->GetName().ToChar(), "MENU_STATUS");
+bool IsOdysseePageOption(const zSTRING& section, const zSTRING& key) {
+    return !_stricmp(section.ToChar(), "MOD_ODYSSEE") && !_stricmp(key.ToChar(), "showMoreInfo");
 }
 
-std::optional<std::vector<Cell>> Capture(zCMenu& menu) {
-    std::vector<Cell> cells;
+zCMenuItemChoice* FindOdysseePager(zCMenu& menu) {
     for (int i = 0; i < menu.m_listItems.GetNumInList(); ++i) {
         auto* item = menu.m_listItems[i];
-        if (!item || !item->owner || item->m_bDontRender || !item->GetIsVisible()) continue;
-        const auto type = item->GetType();
-        const std::string id = item->GetName().ToChar();
-        const bool choice = type == MENU_ITEM_CHOICEBOX && id == "MENU_ITEM_SWITCH_HANDICRAFT_CHOICE";
-        if (type != MENU_ITEM_TEXT && !choice) return std::nullopt;
-        if (item->m_parItemFlags & IT_MULTILINE) return std::nullopt;
+        if (item && item->GetType() == MENU_ITEM_CHOICEBOX
+            && !std::strcmp(item->GetName().ToChar(), "MENU_ITEM_SWITCH_HANDICRAFT_CHOICE")
+            && IsOdysseePageOption(item->m_parOnChgSetOptionSection, item->m_parOnChgSetOption)) {
+            return static_cast<zCMenuItemChoice*>(item);
+        }
+    }
+    return nullptr;
+}
 
-        const zSTRING value = choice
-            ? static_cast<zCMenuItemChoice*>(item)->GetStringByOption()
-            : item->GetText(0);
-        std::string text = value.ToChar();
+std::optional<std::vector<Cell>> Capture(zCMenu& menu, const zCMenuItemChoice* pager, int page) {
+    std::vector<Cell> cells;
+    bool hasPageRows = false;
+    for (int i = 0; i < menu.m_listItems.GetNumInList(); ++i) {
+        auto* item = menu.m_listItems[i];
+        if (!item) continue;
+        const std::string id = item->GetName().ToChar();
+        if (item == pager) {
+            cells.push_back({item->m_parPosX, item->m_parPosY, id, {}, false, true});
+            continue;
+        }
+        if (pager && id == "MENU_ITEM_SWITCH_HANDICRAFT") continue;
+
+        const bool nativeVisible = item->owner && !item->m_bDontRender && item->GetIsVisible();
+        const bool usesPageOption = pager &&
+            IsOdysseePageOption(item->m_parHideIfOptionSectionSet, item->m_parHideIfOptionSet);
+        const int hideOnPage = usesPageOption ? item->m_parHideOnValue : -1;
+        if (!CharStats::VisibleOnPage(nativeVisible, hideOnPage, page)) continue;
+        if (item->GetType() != MENU_ITEM_TEXT || (item->m_parItemFlags & IT_MULTILINE)) return std::nullopt;
+        std::string text = item->GetText(0).ToChar();
         if (text.find_first_not_of(" \t\r\n") == std::string::npos) continue;
         if (text.find_first_of("\r\n") != std::string::npos) return std::nullopt;
         cells.push_back({item->m_parPosX, item->m_parPosY, id, std::move(text),
-                         id.ends_with("_HEADING"), choice});
+                         id.ends_with("_HEADING"), false});
+        hasPageRows |= hideOnPage == 0 || hideOnPage == 1;
     }
+    if (pager && !hasPageRows) return std::nullopt;
     return cells;
 }
 
@@ -75,14 +95,17 @@ zCOLOR Ink(unsigned long value) {
 class StatsPanel : public zCView {
     zCView solid{0, 0, 8, 8};
     zCView cursor{0, 0, 8, 8};
-    std::vector<Cell> lastCells;
-    zCMenu* lastMenu = nullptr;
+    std::array<std::vector<Cell>, 2> pages;
+    int activePage = 0, maxLines = 0;
+    bool paged = false, initialized = false;
     Box bounds;
     std::array<Box, 2> bodies{};
     std::array<int, 2> first{};
     std::array<int, 2> scrollLimit{};
     std::array<Box, 2> tracks{}, thumbs{};
-    Box closeButton, pageButton;
+    std::array<Box, 2> tabs{};
+    std::vector<Box> sectionRules;
+    Box closeButton;
     int divider = 0;
     int headerY = 0;
     bool dirty = true;
@@ -121,13 +144,11 @@ class StatsPanel : public zCView {
         if (scrollLimit[index] > 0) {
             const int thumb = (std::max)(10, box.Height() * visible / rows);
             const int y = box.top + (box.Height() - thumb) * first[index] / scrollLimit[index];
-            tracks[index] = {box.right - 4, box.top, box.right, box.bottom};
-            thumbs[index] = {box.right - 5, y, box.right + 1, y + thumb};
+            tracks[index] = {box.right - 3, box.top, box.right, box.bottom};
+            thumbs[index] = {box.right - 4, y, box.right + 1, y + thumb};
             box.right -= gutter;
         }
 
-        // Reserve enough space for the values, including a mod's extra columns.
-        // Work from the right so a row with a single value shares the same edge.
         std::vector<int> valueWidths;
         for (const auto& row : pane.rows) {
             if (row.size() <= 1) continue;
@@ -139,7 +160,7 @@ class StatsPanel : public zCView {
         }
         int totalWidth = 0;
         for (int width : valueWidths) totalWidth += width + gutter;
-        const int available = (std::max)(1, box.Width() * 54 / 100);
+        const int available = (std::max)(1, box.Width() * 51 / 100);
         if (totalWidth > available) {
             for (int& width : valueWidths) width = (std::max)(1, width * available / totalWidth);
         }
@@ -147,6 +168,9 @@ class StatsPanel : public zCView {
         for (int i = first[index]; i < rows && i < first[index] + visible; ++i) {
             const auto& row = pane.rows[i];
             const int y = box.top + (i - first[index]) * line;
+            if (row.front()->heading && i != first[index]) {
+                sectionRules.push_back({box.left, y - 2, box.right, y - 1});
+            }
             int valueX = box.right;
             for (std::size_t j = 0; j + 1 < row.size(); ++j) {
                 Text(valueX, y, row[row.size() - 1 - j]->text, valueWidths[j], ValueInk, true);
@@ -162,19 +186,19 @@ class StatsPanel : public zCView {
         bodies = {};
         tracks = {};
         thumbs = {};
-        pageButton = {};
+        tabs = {};
+        sectionRules.clear();
         scrollLimit = {};
-        const auto panes = CharStats::MakePanes(lastCells);
-        const int margin = std::clamp(bounds.Height() / 30, 14, 30);
-        const int glyph = (std::max)(12, GetFont()->GetFontY());
-        const int line = glyph + std::clamp(bounds.Height() / 175, 3, 6);
+        const auto panes = CharStats::MakePanes(pages[activePage]);
+        const int margin = CharStats::PanelMargin(screen->psizey);
+        const int line = CharStats::LineHeight(GetFont()->GetFontY());
         const int gutter = (std::max)(6, margin / 2);
         const bool split = panes[1].heading || panes[1].page || !panes[1].rows.empty();
         divider = split ? bounds.left + bounds.Width() * 43 / 100 : 0;
 
         const int closeRight = bounds.right - margin;
-        headerY = bounds.top + margin + line + gutter;
-        closeButton = {closeRight - Width("Esc") - margin, bounds.top + margin / 2,
+        headerY = bounds.top + margin + line + 2;
+        closeButton = {closeRight - Width("Esc") - 2 * gutter, bounds.top + margin / 2,
                        closeRight + gutter, headerY};
         Text(closeRight, bounds.top + margin, "Esc", closeButton.Width(), BronzeInk, true);
 
@@ -182,13 +206,20 @@ class StatsPanel : public zCView {
             const auto& pane = panes[i];
             const int left = i == 0 ? bounds.left + margin : divider + margin;
             const int right = i == 0 && split ? divider - margin : bounds.right - margin;
-            if (const auto* header = pane.page ? pane.page : pane.heading) {
-                const int end = (std::min)(right, closeButton.left) - gutter;
-                Text(left, bounds.top + margin, header->text, end - left, BronzeInk);
-                if (pane.page) {
-                    pageButton = {left - gutter, bounds.top + margin / 2,
-                                  (std::min)(left + Width(header->text) + gutter, end), headerY};
+            if (pane.page) {
+                const std::array<std::string, 2> labels = hasCyrillicFont
+                    ? std::array<std::string, 2>{"\xcd\xe0\xe2\xfb\xea\xe8", "\xd0\xe5\xec\xe5\xf1\xeb\xe0"}
+                    : std::array<std::string, 2>{"Skills", "Crafts"};
+                const int width = ((std::min)(right, closeButton.left) - left - 2 * gutter) / 2;
+                for (int j = 0; j < 2; ++j) {
+                    const int x = left + j * (width + gutter);
+                    tabs[j] = {x, bounds.top + margin / 2, x + width, headerY};
+                    const int labelX = x + (std::max)(0, (width - Width(labels[j])) / 2);
+                    Text(labelX, bounds.top + margin, labels[j], width, j == activePage ? ValueInk : BronzeInk);
                 }
+            } else if (pane.heading) {
+                Text(left, bounds.top + margin, pane.heading->text,
+                     (std::min)(right, closeButton.left) - left - gutter, BronzeInk);
             }
             bodies[i] = {left, headerY + gutter, right, bounds.bottom - margin};
             PaintPane(pane, i, bodies[i], line, gutter);
@@ -205,24 +236,22 @@ class StatsPanel : public zCView {
 public:
     StatsPanel() : zCView(0, 0, 8192, 8192) {
         InitSprite(*this, "G2NRS_PANEL.TGA");
-        SetTransparency(213);
+        SetTransparency(248);
         InitSprite(solid, "G2NRS_SOLID.TGA");
         InitSprite(cursor, "G2NRS_CURSOR.TGA");
     }
 
-    bool Update(zCMenu& menu) {
-        if (!backTex || !screen || !screen->GetFont() || screen->psizex < 320 || screen->psizey < 240) return false;
-        auto cells = Capture(menu);
-        if (!cells || cells->empty()) return false;
-        const auto width = (std::min)(screen->psizex * 84 / 100, screen->psizey * 159 / 100);
-        const auto height = screen->psizey * 84 / 100;
-        const Box next{(screen->psizex - width) / 2, (screen->psizey - height) / 2,
-                       (screen->psizex + width) / 2, (screen->psizey + height) / 2};
-        if (&menu != lastMenu || *cells != lastCells) {
-            first = {};
-            lastCells = std::move(*cells);
-            lastMenu = &menu;
-            dirty = true;
+    bool Open(oCMenu_Status& menu, std::optional<int> rememberedPage) {
+        if (!backTex || !screen || !screen->GetFont()) return false;
+        auto* pager = FindOdysseePager(menu);
+        auto a = Capture(menu, pager, 0);
+        auto b = pager ? Capture(menu, pager, 1) : std::nullopt;
+        if (!a || a->empty() || (pager && (!b || b->empty()))) return false;
+        pages[0] = std::move(*a);
+        if (b) pages[1] = std::move(*b);
+        paged = pager != nullptr;
+        if (paged) {
+            activePage = rememberedPage.value_or(pager->option == 1 ? 1 : 0);
         }
         auto* nativeFont = screen->GetFont();
         for (int i = 0; i < menu.m_listItems.GetNumInList(); ++i) {
@@ -232,15 +261,29 @@ public:
                 break;
             }
         }
-        if (next != bounds || GetFont() != nativeFont) {
+        SetFont(nativeFont);
+        hasCyrillicFont = std::ranges::any_of(pages[0], [](const Cell& cell) {
+            return cell.heading && (std::count_if(cell.text.begin(), cell.text.end(),
+                [](unsigned char c) { return c >= 0xC0; }) * 2 > static_cast<int>(cell.text.size()));
+        });
+        for (const auto& page : pages) {
+            for (const auto& pane : CharStats::MakePanes(page)) {
+                maxLines = (std::max)(maxLines, static_cast<int>(pane.rows.size()));
+            }
+        }
+        initialized = true;
+        return true;
+    }
+
+    bool Update() {
+        if (!initialized || !screen || screen->psizex < 320 || screen->psizey < 240) return false;
+        const auto [width, height] = CharStats::PanelSize(screen->psizex, screen->psizey,
+                                                        GetFont()->GetFontY(), maxLines);
+        const Box next{(screen->psizex - width) / 2, (screen->psizey - height) / 2,
+                       (screen->psizex + width) / 2, (screen->psizey + height) / 2};
+        if (next != bounds) {
             bounds = next;
             Place(*this, bounds);
-            SetFont(nativeFont);
-            // Check a native heading rather than the user's Windows locale.
-            hasCyrillicFont = std::ranges::any_of(lastCells, [](const Cell& cell) {
-                return cell.heading && (std::count_if(cell.text.begin(), cell.text.end(),
-                    [](unsigned char c) { return c >= 0xC0; }) * 2 > static_cast<int>(cell.text.size()));
-            });
             dirty = true;
         }
         if (std::exchange(dirty, false)) Paint();
@@ -248,8 +291,21 @@ public:
     }
 
     bool CloseAt(POINT p) const { return closeButton.Contains(p); }
+    bool HasPages() const { return paged; }
 
-    bool PageAt(POINT p) const { return pageButton.Contains(p); }
+    std::optional<int> PageAt(POINT p) const {
+        for (int i = 0; i < 2; ++i) {
+            if (tabs[i].Contains(p)) return i;
+        }
+        return std::nullopt;
+    }
+
+    void ShowPage(int page) {
+        if (!paged || activePage == page) return;
+        activePage = page;
+        first[1] = 0;
+        dirty = true;
+    }
 
     void ScrollAt(POINT p, int steps) {
         for (int i = 0; i < 2; ++i) {
@@ -264,8 +320,13 @@ public:
         const auto oldSource = zrenderer->GetAlphaBlendSource();
         zrenderer->SetAlphaBlendSource(zRND_ALPHA_SOURCE_MATERIAL);
         zCView::Blit();
-        if (divider) DrawSolid({divider, headerY + 8, divider + 1, bounds.bottom - 20}, LineInk);
-        DrawSolid({bounds.left + 20, headerY, bounds.right - 20, headerY + 1}, LineInk);
+        if (divider) DrawSolid({divider, headerY + 8, divider + 1, bodies[0].bottom}, LineInk);
+        DrawSolid({bodies[0].left, headerY, (std::max)(bodies[0].right, bodies[1].right), headerY + 1}, LineInk);
+        for (const auto& rule : sectionRules) DrawSolid(rule, LineInk);
+        if (paged) {
+            const auto& tab = tabs[activePage];
+            DrawSolid({tab.left, tab.bottom - 1, tab.right, tab.bottom + 2}, BronzeInk);
+        }
         for (int i = 0; i < 2; ++i) {
             DrawSolid(tracks[i], LineInk);
             DrawSolid(thumbs[i], BronzeInk);
@@ -289,6 +350,8 @@ void ApplyMouseAcquisition() {
     reinterpret_cast<int(__cdecl*)()>(0x004D3D30)();
 }
 
+std::optional<int> odysseePage;
+
 class StatusSession {
     oCMenu_Status& primary;
     StatsPanel panel;
@@ -296,8 +359,8 @@ class StatusSession {
     StatsMouse::MouseEvents input;
     StatsMouse::StatsPointer cursor;
     RECT client{};
-    bool ready = false, listening = false, cursorActive = false;
-    bool restoreMouse = false, centerOnOpen = true;
+    bool opened = false, ready = false, closing = false, listening = false, cursorActive = false;
+    bool restoreMouse = false, centerOnOpen = true, leftDown = false, rightDown = false;
 
     void ReleaseMouse() {
         if (!std::exchange(cursorActive, false)) return;
@@ -315,6 +378,27 @@ class StatusSession {
                      MulDiv(point->y - client.top, screen->psizey, client.bottom - client.top)};
     }
 
+    void SelectPage(int page) {
+        odysseePage = page;
+        panel.ShowPage(page);
+    }
+
+    void BeginClose() {
+        if (closing) return;
+        closing = true;
+        input.Discard();
+    }
+
+    std::optional<POINT> ClickPoint(std::optional<POINT> event, int key, bool& down) const {
+        const bool held = (GetAsyncKeyState(key) & 0x8000) != 0;
+        const bool pressed = held && !down;
+        down = held;
+        if (event) return ScreenPoint(event);
+        POINT desktop{};
+        if (pressed && GetCursorPos(&desktop)) return ScreenPoint(desktop);
+        return std::nullopt;
+    }
+
 public:
     explicit StatusSession(oCMenu_Status& menu) : primary(menu) {}
 
@@ -323,37 +407,54 @@ public:
         input.Stop();
     }
 
+    bool HandleKey(oCMenu_Status* menu, int key) {
+        if (menu != &primary || !ready || zCMenu::GetActive() != menu) return false;
+        if (key == KEY_ESCAPE || (zinput && zinput->GetFirstBindedLogicalKey(key) == StatusLogicalKey)) {
+            BeginClose();
+            return false;
+        }
+        if (closing) return true;
+        if (!panel.HasPages()) return false;
+        if (key == KEY_LEFT || key == KEY_RIGHT) {
+            SelectPage(key == KEY_RIGHT ? 1 : 0);
+            return true;
+        }
+        // The stock Odyssee item starts MENU_STATUS again on Enter.
+        return key == KEY_RETURN || key == KEY_NUMPADENTER;
+    }
+
     void BeforeFrame(zCMenu* menu) {
-        if (menu != zCMenu::GetActive()) return;
-        const bool ours = menu == &primary || IsStatusMenu(menu);
-        if (input.TakeFocusLoss() || !ours || !StatsMouse::HasFocus(window)) {
+        if (menu != &primary || zCMenu::GetActive() != menu) return;
+        if (input.TakeFocusLoss() || !StatsMouse::HasFocus(window)) {
             ReleaseMouse();
             input.Discard();
         }
-        if (!ours || !ready || !menu->m_screenInitDone || !zinput || !StatsMouse::HasFocus(window)
+        if (closing || !ready || !menu->m_screenInitDone || !zinput || !StatsMouse::HasFocus(window)
             || !StatsMouse::ClientBounds(window, client)) return;
         if (!cursorActive) {
             if (!listening) listening = input.Start(window);
-            if (!listening) return;
+            // Even if the Windows message hooks are unavailable, poll button edges.
             restoreMouse = zinput->GetDeviceEnabled(zINPUT_MOUSE) != 0;
             if (restoreMouse) {
                 zinput->SetDeviceEnabled(zINPUT_MOUSE, FALSE);
                 ApplyMouseAcquisition();
             }
             cursor.Enter(window, client, std::exchange(centerOnOpen, false));
+            leftDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+            rightDown = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0;
             cursorActive = true;
         }
         if (menu->m_exitState != zCMenu::NONE) return;
         const auto events = input.Take();
-        const auto click = ScreenPoint(events.leftClick);
-        if (ScreenPoint(events.rightClick) || (click && panel.CloseAt(*click))) {
+        const auto click = ClickPoint(events.leftClick, VK_LBUTTON, leftDown);
+        const auto right = ClickPoint(events.rightClick, VK_RBUTTON, rightDown);
+        if (right || (click && panel.CloseAt(*click))) {
+            BeginClose();
             menu->HandleEvent(KEY_ESCAPE);
             return;
         }
-        if (click && panel.PageAt(*click)) {
-            menu->HandleEvent(KEY_RIGHT);
-            menu->HandleEvent(KEY_RETURN);
-            return;
+        if (click) {
+            if (const auto page = panel.PageAt(*click)) SelectPage(*page);
         }
         if (const auto wheel = ScreenPoint(events.wheelPosition); wheel && events.wheel) {
             panel.ScrollAt(*wheel, events.wheel);
@@ -361,17 +462,15 @@ public:
     }
 
     bool ReplaceDraw(zCView* native) {
-        auto* menu = zCMenu::GetActive();
-        if (!menu || (menu != &primary && !IsStatusMenu(menu)) || !menu->m_screenInitDone) return false;
-        if (native != menu->m_pWindow) {
-            // A native page change can run a fresh MENU_STATUS over the previous one.
-            return menu != &primary && native == primary.m_pWindow && ready;
+        if (native != primary.m_pWindow) return false;
+        // ScreenDone can change the active menu while the old window still draws.
+        if (ready && (closing || primary.m_exitState != zCMenu::NONE)) return true;
+        if (zCMenu::GetActive() != &primary || !primary.m_screenInitDone) return false;
+        if (!opened) {
+            opened = true;
+            ready = panel.Open(primary, odysseePage);
         }
-        ready = panel.Update(*menu);
-        if (!ready) {
-            ReleaseMouse();
-            return false;
-        }
+        if (!ready || !panel.Update()) return false;
         panel.DrawItems();
         if (cursorActive && StatsMouse::HasFocus(window)) {
             CURSORINFO info{};
@@ -410,6 +509,15 @@ auto FrameHook = Union::CreateHook(
 void __fastcall MenuFrame(zCMenu* self, void* edx, int render) {
     if (current) current->BeforeFrame(self);
     FrameHook(self, edx, render);
+}
+
+int __fastcall StatusKey(oCMenu_Status*, void*, int);
+auto KeyHook = Union::CreateHook(
+    SIGNATURE_OF(&oCMenu_Status::HandleEvent), &StatusKey, Union::HookType::Hook_Detours);
+
+int __fastcall StatusKey(oCMenu_Status* self, void* edx, int key) {
+    if (current && current->HandleKey(self, key)) return TRUE;
+    return KeyHook(self, edx, key);
 }
 
 void __fastcall DrawView(zCView*, void*);

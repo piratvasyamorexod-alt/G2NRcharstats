@@ -33,7 +33,7 @@ foreach ($texture in @("G2NRS_PANEL-C.TEX", "G2NRS_SOLID-C.TEX", "G2NRS_CURSOR-C
 $cmake = Join-Path $template "CMakeLists.txt"
 $body = [IO.File]::ReadAllText($cmake)
 $body = $body.Replace("project(UnionPlugin", "project(G2NRcharstats")
-$body = $body.Replace('VERSION ${PROJECT_VERSION}', 'VERSION 0.1.0.0')
+$body = $body.Replace('VERSION ${PROJECT_VERSION}', 'VERSION 0.1.1.0')
 if ($body -notmatch "project\(G2NRcharstats") { throw "Upstream CMake file changed" }
 $body += "`r`ntarget_sources(G2NRcharstats PRIVATE src/stats_cursor.rc)`r`n"
 [IO.File]::WriteAllText($cmake, $body)
