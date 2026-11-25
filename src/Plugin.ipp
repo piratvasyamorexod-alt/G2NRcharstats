@@ -3,6 +3,7 @@
 
 #include <array>
 #include <cstring>
+#include <string_view>
 #include <utility>
 
 namespace GOTHIC_NAMESPACE {
@@ -92,9 +93,131 @@ zCOLOR Ink(unsigned long value) {
     return color;
 }
 
+enum class HintStat { Strength, Dexterity, OneHand, TwoHand, Armor, Diving };
+
+std::optional<HintStat> StatForHint(std::string_view id, bool odyssee) {
+    if (id == "MENU_ITEM_ATTRIBUTE_1_TITLE") return HintStat::Strength;
+    if (id == "MENU_ITEM_ATTRIBUTE_2_TITLE") return HintStat::Dexterity;
+    if (id == "MENU_ITEM_TALENT_1_TITLE") return HintStat::OneHand;
+    if (id == "MENU_ITEM_TALENT_2_TITLE") return HintStat::TwoHand;
+    if (id == "MENU_ITEM_ARMOR_1_TITLE") return HintStat::Armor;
+    if (id == "MENU_ITEM_ATTRIBUTE_8_TITLE" && odyssee) return HintStat::Diving;
+    return std::nullopt;
+}
+
+std::optional<int> ScriptInt(const char* name) {
+    auto* symbol = parser ? parser->GetSymbol(zSTRING(name)) : nullptr;
+    if (!symbol || symbol->type != zPAR_TYPE_INT || !symbol->ele) return std::nullopt;
+    int value = 0;
+    symbol->GetValue(value, 0);
+    return value;
+}
+
+int LessonRate(int learned) {
+    constexpr std::array thresholds{30, 60, 90, 120};
+    return 1 + static_cast<int>(std::ranges::upper_bound(thresholds, learned) - thresholds.begin());
+}
+
+std::string MenuText(bool russian, const wchar_t* ru, const char* en) {
+    if (!russian) return en;
+    const int size = WideCharToMultiByte(1251, 0, ru, -1, nullptr, 0, nullptr, nullptr);
+    if (size <= 0) return en;
+    std::string text(size, '\0');
+    if (!WideCharToMultiByte(1251, 0, ru, -1, text.data(), size, nullptr, nullptr)) return en;
+    text.pop_back();
+    return text;
+}
+
+std::vector<std::string> HintLines(HintStat stat, oCNpc& hero, bool russian, bool odyssee,
+                                   bool standardTraining) {
+    std::vector<std::string> lines;
+    const auto label = [russian](const wchar_t* ru, const char* en) { return MenuText(russian, ru, en); };
+    const auto add = [&](const wchar_t* ru, const char* en, int value, std::string suffix = {}) {
+        lines.push_back(label(ru, en) + "  " + std::to_string(value) + suffix);
+    };
+    const auto lp = label(L" ОО", " LP");
+    const auto addTraining = [&](int learned) {
+        const int rate = LessonRate(learned);
+        add(L"Урок +1", "Train +1", rate, lp);
+        if (rate < 5) {
+            lines.push_back(std::to_string(rate + 1) + lp + label(L" за +1 с ", " per +1 at ")
+                            + std::to_string(rate * 30) + label(L" изученных", " trained"));
+        }
+    };
+
+    switch (stat) {
+    case HintStat::Strength:
+        if (odyssee) {
+            lines.push_back(label(L"Обычный арбалет  +", "Standard crossbow  +")
+                + std::to_string(hero.GetAttribute(NPC_ATR_STRENGTH))
+                + label(L" урона до защиты", " damage before armor"));
+        } else {
+            add(L"Полный удар (штатно)", "Full hit (stock)",
+                hero.GetAttribute(NPC_ATR_STRENGTH), label(L" урона от силы", " damage from strength"));
+        }
+        if (standardTraining) addTraining(hero.aiscriptvars[81]);
+        break;
+    case HintStat::Dexterity: {
+        const int dex = hero.GetAttribute(NPC_ATR_DEXTERITY);
+        add(odyssee ? L"Поломка отмычки при ошибке" : L"Поломка отмычки (штатно)",
+            odyssee ? "Lockpick breaks on error" : "Lockpick break (stock)",
+            100 - std::clamp(dex, 0, 100), "%");
+        if (odyssee) {
+            constexpr std::array thresholds{60, 130, 200, 250};
+            for (int i = 3; i >= 0; --i) {
+                const std::string flag = "TALENT_SCHLOESSERKNACKEN" + std::to_string(i + 2);
+                if (ScriptInt(flag.c_str()) != 1) continue;
+                const int missing = thresholds[i] - dex;
+                lines.push_back(label(L"Замки ", "Locks ") + std::to_string(i + 2) +
+                    (missing <= 0 ? label(L" уровня  ловкости хватает", "  dexterity met") :
+                        label(L" уровня  еще ", "  need ") + std::to_string(missing) +
+                        label(L" ловкости", " dexterity")));
+                break;
+            }
+        }
+        if (standardTraining) addTraining(hero.aiscriptvars[82]);
+        break;
+    }
+    case HintStat::OneHand:
+    case HintStat::TwoHand: {
+        const bool oneHand = stat == HintStat::OneHand;
+        const int skill = std::clamp(hero.GetHitChance(oneHand ? NPC_HITCHANCE_1H : NPC_HITCHANCE_2H), 0, 100);
+        add(odyssee ? L"Шанс полного удара" : L"Полный удар (штатно)",
+            odyssee ? "Full hit chance" : "Full hit (stock)", skill, "%");
+        if (odyssee && skill < 60) {
+            const int remaining = (skill < 30 ? 30 : 60) - skill;
+            add(skill < 30 ? L"До бойца" : L"До мастера", skill < 30 ? "To Fighter" : "To Master",
+                remaining, label(L" п. п.", " pp"));
+            if (standardTraining) {
+                const int learned = hero.aiscriptvars[oneHand ? 84 : 85];
+                int cost = 0;
+                for (int i = 0; i < remaining; ++i) cost += LessonRate(learned + i);
+                add(L"Цена при уроках +1", "Cost with +1 lessons", cost, lp);
+            }
+        }
+        break;
+    }
+    case HintStat::Armor:
+        add(L"От рубящего", "Edge protection", hero.GetProtectionByIndex(oEDamageIndex_Edge));
+        add(L"От дробящего", "Blunt protection", hero.GetProtectionByIndex(oEDamageIndex_Blunt));
+        break;
+    case HintStat::Diving: {
+        float swim = 0.0f, capacity = 0.0f, remaining = 0.0f;
+        hero.GetSwimDiveTime(swim, capacity, remaining);
+        if (capacity >= 1000.0f && capacity <= 3600000.0f) {
+            add(L"Запас воздуха", "Air capacity", static_cast<int>(capacity / 1000.0f),
+                label(L" сек.", " sec."));
+        }
+        break;
+    }
+    }
+    return lines;
+}
+
 class StatsPanel : public zCView {
     zCView solid{0, 0, 8, 8};
     zCView cursor{0, 0, 8, 8};
+    zCView hintText{0, 0, 8, 8};
     std::array<std::vector<Cell>, 2> pages;
     int activePage = 0, maxLines = 0;
     bool paged = false, initialized = false;
@@ -110,6 +233,19 @@ class StatsPanel : public zCView {
     int headerY = 0;
     bool dirty = true;
     bool hasCyrillicFont = false;
+    bool odyssee = false, standardTraining = false;
+
+    struct HintRow {
+        Box bounds;
+        HintStat stat;
+        const Cell* title;
+        int column;
+    };
+    std::vector<HintRow> hintRows;
+    const HintRow* hovered = nullptr;
+    DWORD hoverStarted = 0;
+    bool hintPrepared = false;
+    Box hintBox;
 
     int Width(const std::string& text) {
         return GetFont()->GetFontX(zSTRING(text.c_str()));
@@ -176,6 +312,10 @@ class StatsPanel : public zCView {
                 Text(valueX, y, row[row.size() - 1 - j]->text, valueWidths[j], ValueInk, true);
                 valueX -= valueWidths[j] + gutter;
             }
+            if (const auto stat = StatForHint(row.front()->id, odyssee)) {
+                hintRows.push_back({{box.left, y, box.right, (std::min)(box.bottom, y + line)},
+                                    *stat, row.front(), index});
+            }
             Text(box.left, y, row.front()->text, valueX - box.left,
                  row.front()->heading ? BronzeInk : TextInk);
         }
@@ -183,6 +323,8 @@ class StatsPanel : public zCView {
 
     void Paint() {
         ClrPrintwin();
+        ClearHover();
+        hintRows.clear();
         bodies = {};
         tracks = {};
         thumbs = {};
@@ -233,6 +375,52 @@ class StatsPanel : public zCView {
         solid.Blit();
     }
 
+    void ClearHover() {
+        hovered = nullptr;
+        hintPrepared = false;
+        hintBox = {};
+    }
+
+    void BuildHint(const HintRow& row, oCNpc& hero) {
+        const auto details = HintLines(row.stat, hero, hasCyrillicFont, odyssee, standardTraining);
+        if (details.empty() || !solid.backTex) return;
+        const int padding = (std::max)(8, CharStats::PanelMargin(screen->psizey) / 2);
+        const int line = CharStats::LineHeight(GetFont()->GetFontY());
+        const int maxWidth = (std::min)(screen->psizex - 2 * padding, bounds.Width());
+        std::vector<std::string> lines{row.title->text};
+        for (auto detail : details) {
+            while (Width(detail) > maxWidth - 2 * padding) {
+                auto cut = detail.find_last_of(' ');
+                while (cut != std::string::npos && cut > 0
+                       && Width(detail.substr(0, cut)) > maxWidth - 2 * padding) {
+                    cut = detail.find_last_of(' ', cut - 1);
+                }
+                if (cut == std::string::npos || cut == 0) return;
+                lines.push_back(detail.substr(0, cut));
+                detail.erase(0, cut + 1);
+            }
+            lines.push_back(std::move(detail));
+        }
+        int width = 0;
+        for (const auto& text : lines) width = (std::max)(width, Width(text));
+        width += 2 * padding;
+        const int height = 2 * padding + line * static_cast<int>(lines.size());
+        if (width > maxWidth || height > screen->psizey - 2 * padding) return;
+        const int preferredX = row.column == 0 ? row.bounds.right + padding : row.bounds.left - width - padding;
+        const int x = std::clamp(preferredX, padding, screen->psizex - width - padding);
+        const int y = std::clamp(row.bounds.top, padding, screen->psizey - height - padding);
+        hintBox = {x, y, x + width, y + height};
+        Place(hintText, hintBox);
+        hintText.ClrPrintwin();
+        int textY = padding;
+        for (const auto& text : lines) {
+            auto ink = Ink(textY == padding ? BronzeInk : TextInk);
+            hintText.CreateText(hintText.anx(padding), hintText.any(textY), zSTRING(text.c_str()),
+                                0.0f, ink, FALSE, TRUE);
+            textY += line;
+        }
+    }
+
 public:
     StatsPanel() : zCView(0, 0, 8192, 8192) {
         InitSprite(*this, "G2NRS_PANEL.TGA");
@@ -250,6 +438,10 @@ public:
         pages[0] = std::move(*a);
         if (b) pages[1] = std::move(*b);
         paged = pager != nullptr;
+        odyssee = paged && ScriptInt("REAL_STRENGTH") == 81 && ScriptInt("REAL_DEXTERITY") == 82
+            && ScriptInt("REAL_TALENT_1H") == 84 && ScriptInt("REAL_TALENT_2H") == 85
+            && ScriptInt("TALENT_SCHLOESSERKNACKEN3").has_value();
+        standardTraining = odyssee && ScriptInt("ODY_CHECKSNCMODE_ENABLE") == 0;
         if (paged) {
             activePage = rememberedPage.value_or(pager->option == 1 ? 1 : 0);
         }
@@ -262,6 +454,7 @@ public:
             }
         }
         SetFont(nativeFont);
+        hintText.SetFont(nativeFont);
         hasCyrillicFont = std::ranges::any_of(pages[0], [](const Cell& cell) {
             return cell.heading && (std::count_if(cell.text.begin(), cell.text.end(),
                 [](unsigned char c) { return c >= 0xC0; }) * 2 > static_cast<int>(cell.text.size()));
@@ -342,6 +535,38 @@ public:
         Place(cursor, {p.x, p.y, p.x + size, p.y + size});
         cursor.Blit();
         zrenderer->SetAlphaBlendSource(oldSource);
+    }
+
+    void DrawHint(std::optional<POINT> position) {
+        if (!position || !oCNpc::player) {
+            ClearHover();
+            return;
+        }
+        const auto hit = std::ranges::find_if(hintRows, [&](const HintRow& row) {
+            return row.bounds.Contains(*position);
+        });
+        if (hit == hintRows.end()) {
+            ClearHover();
+            return;
+        }
+        const DWORD now = GetTickCount();
+        if (&*hit != hovered) {
+            ClearHover();
+            hovered = &*hit;
+            hoverStarted = now;
+        }
+        if (now - hoverStarted < 350) return;
+        if (!std::exchange(hintPrepared, true)) BuildHint(*hovered, *oCNpc::player);
+        if (hintBox.Width() <= 0) return;
+
+        const auto oldSource = zrenderer->GetAlphaBlendSource();
+        zrenderer->SetAlphaBlendSource(zRND_ALPHA_SOURCE_MATERIAL);
+        const auto& row = hovered->bounds;
+        DrawSolid({row.left - 5, row.top, row.left - 3, row.bottom}, BronzeInk);
+        DrawSolid(hintBox, LineInk);
+        DrawSolid({hintBox.left + 1, hintBox.top + 1, hintBox.right - 1, hintBox.bottom - 1}, 0xFF202318);
+        zrenderer->SetAlphaBlendSource(oldSource);
+        hintText.DrawItems();
     }
 };
 
@@ -472,13 +697,15 @@ public:
         }
         if (!ready || !panel.Update()) return false;
         panel.DrawItems();
-        if (cursorActive && StatsMouse::HasFocus(window)) {
+        POINT desktop{};
+        const auto point = cursorActive && StatsMouse::HasFocus(window) && GetCursorPos(&desktop)
+            ? ScreenPoint(desktop) : std::nullopt;
+        panel.DrawHint(point);
+        if (point) {
             CURSORINFO info{};
             info.cbSize = sizeof(info);
-            POINT desktop{};
-            if ((!GetCursorInfo(&info) || !(info.flags & CURSOR_SHOWING) || !info.hCursor)
-                && GetCursorPos(&desktop)) {
-                if (const auto p = ScreenPoint(desktop)) panel.DrawFallbackCursor(*p);
+            if (!GetCursorInfo(&info) || !(info.flags & CURSOR_SHOWING) || !info.hCursor) {
+                panel.DrawFallbackCursor(*point);
             }
         }
         return true;

@@ -33,9 +33,10 @@ foreach ($texture in @("G2NRS_PANEL-C.TEX", "G2NRS_SOLID-C.TEX", "G2NRS_CURSOR-C
 $cmake = Join-Path $template "CMakeLists.txt"
 $body = [IO.File]::ReadAllText($cmake)
 $body = $body.Replace("project(UnionPlugin", "project(G2NRcharstats")
-$body = $body.Replace('VERSION ${PROJECT_VERSION}', 'VERSION 0.1.1.0')
+$body = $body.Replace('VERSION ${PROJECT_VERSION}', 'VERSION 0.1.2.0')
 if ($body -notmatch "project\(G2NRcharstats") { throw "Upstream CMake file changed" }
 $body += "`r`ntarget_sources(G2NRcharstats PRIVATE src/stats_cursor.rc)`r`n"
+$body += 'target_compile_options(G2NRcharstats PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:/utf-8>")' + "`r`n"
 [IO.File]::WriteAllText($cmake, $body)
 cmake -S $template -B $build -G "Visual Studio 17 2022" -A Win32 -DGOTHIC_API_G2A=ON
 Check "CMake configure failed"
