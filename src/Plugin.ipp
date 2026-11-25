@@ -113,6 +113,21 @@ std::optional<int> ScriptInt(const char* name) {
     return value;
 }
 
+void RestoreTrainingColumns(std::vector<Cell>& cells, const oCNpc& hero) {
+    // Odyssee's script-driven training cells may still be empty during the capture.
+    constexpr std::array totals{"MENU_ITEM_ATTRIBUTE_1", "MENU_ITEM_ATTRIBUTE_2", "MENU_ITEM_ATTRIBUTE_3"};
+    for (std::size_t i = 0; i < totals.size(); ++i) {
+        const std::string id = std::string(totals[i]) + "_SKILL";
+        const std::string learned = std::to_string(hero.aiscriptvars[81 + i]);
+        const auto native = std::ranges::find(cells, id, &Cell::id);
+        if (native != cells.end()) {
+            native->text = learned;
+        } else if (const auto total = std::ranges::find(cells, totals[i], &Cell::id); total != cells.end()) {
+            cells.push_back({total->x - 500, total->y, id, learned, false, false});
+        }
+    }
+}
+
 int LessonRate(int learned) {
     constexpr std::array thresholds{30, 60, 90, 120};
     return 1 + static_cast<int>(std::ranges::upper_bound(thresholds, learned) - thresholds.begin());
@@ -136,18 +151,25 @@ std::vector<std::string> HintLines(HintStat stat, oCNpc& hero, bool russian, boo
         lines.push_back(label(ru, en) + "  " + std::to_string(value) + suffix);
     };
     const auto lp = label(L" ОО", " LP");
-    const auto addTraining = [&](int learned) {
+    const auto addTraining = [&](int learned, int total) {
         const int rate = LessonRate(learned);
-        add(L"Урок +1", "Train +1", rate, lp);
         if (rate < 5) {
-            lines.push_back(std::to_string(rate + 1) + lp + label(L" за +1 с ", " per +1 at ")
-                            + std::to_string(rate * 30) + label(L" изученных", " trained"));
+            add(L"До подорожания", "Until the price increases", rate * 30 - learned);
+            lines.push_back(label(L"Цена за +1  ", "Cost per +1  ") + std::to_string(rate)
+                            + " -> " + std::to_string(rate + 1) + lp);
+        } else {
+            lines.push_back(label(L"Достигнут последний порог", "Highest price tier reached"));
+            add(L"Цена за +1", "Cost per +1", rate, lp);
         }
+        lines.push_back(label(L"Изучено  ", "Trained  ") + std::to_string(learned)
+                        + label(L"   Всего  ", "   Total  ") + std::to_string(total));
     };
 
     switch (stat) {
     case HintStat::Strength:
-        if (odyssee) {
+        if (standardTraining) {
+            addTraining(hero.aiscriptvars[81], hero.GetAttribute(NPC_ATR_STRENGTH));
+        } else if (odyssee) {
             lines.push_back(label(L"Обычный арбалет  +", "Standard crossbow  +")
                 + std::to_string(hero.GetAttribute(NPC_ATR_STRENGTH))
                 + label(L" урона до защиты", " damage before armor"));
@@ -155,10 +177,13 @@ std::vector<std::string> HintLines(HintStat stat, oCNpc& hero, bool russian, boo
             add(L"Полный удар (штатно)", "Full hit (stock)",
                 hero.GetAttribute(NPC_ATR_STRENGTH), label(L" урона от силы", " damage from strength"));
         }
-        if (standardTraining) addTraining(hero.aiscriptvars[81]);
         break;
     case HintStat::Dexterity: {
         const int dex = hero.GetAttribute(NPC_ATR_DEXTERITY);
+        if (standardTraining) {
+            addTraining(hero.aiscriptvars[82], dex);
+            break;
+        }
         add(odyssee ? L"Поломка отмычки при ошибке" : L"Поломка отмычки (штатно)",
             odyssee ? "Lockpick breaks on error" : "Lockpick break (stock)",
             100 - std::clamp(dex, 0, 100), "%");
@@ -175,7 +200,6 @@ std::vector<std::string> HintLines(HintStat stat, oCNpc& hero, bool russian, boo
                 break;
             }
         }
-        if (standardTraining) addTraining(hero.aiscriptvars[82]);
         break;
     }
     case HintStat::OneHand:
@@ -239,7 +263,6 @@ class StatsPanel : public zCView {
         Box bounds;
         HintStat stat;
         const Cell* title;
-        int column;
     };
     std::vector<HintRow> hintRows;
     const HintRow* hovered = nullptr;
@@ -314,7 +337,7 @@ class StatsPanel : public zCView {
             }
             if (const auto stat = StatForHint(row.front()->id, odyssee)) {
                 hintRows.push_back({{box.left, y, box.right, (std::min)(box.bottom, y + line)},
-                                    *stat, row.front(), index});
+                                    *stat, row.front()});
             }
             Text(box.left, y, row.front()->text, valueX - box.left,
                  row.front()->heading ? BronzeInk : TextInk);
@@ -406,10 +429,7 @@ class StatsPanel : public zCView {
         width += 2 * padding;
         const int height = 2 * padding + line * static_cast<int>(lines.size());
         if (width > maxWidth || height > screen->psizey - 2 * padding) return;
-        const int preferredX = row.column == 0 ? row.bounds.right + padding : row.bounds.left - width - padding;
-        const int x = std::clamp(preferredX, padding, screen->psizex - width - padding);
-        const int y = std::clamp(row.bounds.top, padding, screen->psizey - height - padding);
-        hintBox = {x, y, x + width, y + height};
+        hintBox = {0, 0, width, height};
         Place(hintText, hintBox);
         hintText.ClrPrintwin();
         int textY = padding;
@@ -442,6 +462,9 @@ public:
             && ScriptInt("REAL_TALENT_1H") == 84 && ScriptInt("REAL_TALENT_2H") == 85
             && ScriptInt("TALENT_SCHLOESSERKNACKEN3").has_value();
         standardTraining = odyssee && ScriptInt("ODY_CHECKSNCMODE_ENABLE") == 0;
+        if (standardTraining && oCNpc::player) {
+            for (auto& page : pages) RestoreTrainingColumns(page, *oCNpc::player);
+        }
         if (paged) {
             activePage = rememberedPage.value_or(pager->option == 1 ? 1 : 0);
         }
@@ -559,12 +582,20 @@ public:
         if (!std::exchange(hintPrepared, true)) BuildHint(*hovered, *oCNpc::player);
         if (hintBox.Width() <= 0) return;
 
+        const int gap = std::clamp(screen->psizey / 64, 10, 24);
+        const int width = hintBox.Width(), height = hintBox.Height();
+        const int x = static_cast<int>(position->x), y = static_cast<int>(position->y);
+        const int maxX = screen->psizex - width - 1, maxY = screen->psizey - height - 1;
+        const int left = std::clamp(x + gap <= maxX ? x + gap : x - width - gap, 1, maxX);
+        const int top = std::clamp(y + gap <= maxY ? y + gap : y - height - gap, 1, maxY);
+        const Box card{left, top, left + width, top + height};
+        Place(hintText, card);
         const auto oldSource = zrenderer->GetAlphaBlendSource();
         zrenderer->SetAlphaBlendSource(zRND_ALPHA_SOURCE_MATERIAL);
         const auto& row = hovered->bounds;
         DrawSolid({row.left - 5, row.top, row.left - 3, row.bottom}, BronzeInk);
-        DrawSolid(hintBox, LineInk);
-        DrawSolid({hintBox.left + 1, hintBox.top + 1, hintBox.right - 1, hintBox.bottom - 1}, 0xFF202318);
+        DrawSolid(card, LineInk);
+        DrawSolid({card.left + 1, card.top + 1, card.right - 1, card.bottom - 1}, 0xFF202318);
         zrenderer->SetAlphaBlendSource(oldSource);
         hintText.DrawItems();
     }
