@@ -93,15 +93,29 @@ zCOLOR Ink(unsigned long value) {
     return color;
 }
 
-enum class HintStat { Strength, Dexterity, OneHand, TwoHand, Armor, Diving };
+enum class HintStat { Training, Armor, Diving, Experience, MagicKnowledge, Lockpicking };
 
-std::optional<HintStat> StatForHint(std::string_view id, bool odyssee) {
-    if (id == "MENU_ITEM_ATTRIBUTE_1_TITLE") return HintStat::Strength;
-    if (id == "MENU_ITEM_ATTRIBUTE_2_TITLE") return HintStat::Dexterity;
-    if (id == "MENU_ITEM_TALENT_1_TITLE") return HintStat::OneHand;
-    if (id == "MENU_ITEM_TALENT_2_TITLE") return HintStat::TwoHand;
-    if (id == "MENU_ITEM_ARMOR_1_TITLE") return HintStat::Armor;
-    if (id == "MENU_ITEM_ATTRIBUTE_8_TITLE" && odyssee) return HintStat::Diving;
+struct Hint {
+    HintStat stat;
+    int counter = 0;
+};
+
+std::optional<Hint> StatForHint(std::string_view id, bool odyssee, bool standardTraining) {
+    if (standardTraining) {
+        if (id == "MENU_ITEM_ATTRIBUTE_1_TITLE") return Hint{HintStat::Training, 81};
+        if (id == "MENU_ITEM_ATTRIBUTE_2_TITLE") return Hint{HintStat::Training, 82};
+        if (id == "MENU_ITEM_TALENT_1_TITLE") return Hint{HintStat::Training, 84};
+        if (id == "MENU_ITEM_TALENT_2_TITLE") return Hint{HintStat::Training, 85};
+        if (id == "MENU_ITEM_TALENT_3_TITLE") return Hint{HintStat::Training, 86};
+        if (id == "MENU_ITEM_TALENT_4_TITLE") return Hint{HintStat::Training, 87};
+    }
+    if (id == "MENU_ITEM_ARMOR_1_TITLE") return Hint{HintStat::Armor};
+    if (id == "MENU_ITEM_EXP_TITLE") return Hint{HintStat::Experience};
+    if (odyssee) {
+        if (id == "MENU_ITEM_ATTRIBUTE_8_TITLE") return Hint{HintStat::Diving};
+        if (id == "MENU_ITEM_ATTRIBUTE_5_TITLE") return Hint{HintStat::MagicKnowledge};
+        if (id == "MENU_ITEM_TALENT_5_TITLE") return Hint{HintStat::Lockpicking};
+    }
     return std::nullopt;
 }
 
@@ -128,11 +142,6 @@ void RestoreTrainingColumns(std::vector<Cell>& cells, const oCNpc& hero) {
     }
 }
 
-int LessonRate(int learned) {
-    constexpr std::array thresholds{30, 60, 90, 120};
-    return 1 + static_cast<int>(std::ranges::upper_bound(thresholds, learned) - thresholds.begin());
-}
-
 std::string MenuText(bool russian, const wchar_t* ru, const char* en) {
     if (!russian) return en;
     const int size = WideCharToMultiByte(1251, 0, ru, -1, nullptr, 0, nullptr, nullptr);
@@ -143,81 +152,100 @@ std::string MenuText(bool russian, const wchar_t* ru, const char* en) {
     return text;
 }
 
-std::vector<std::string> HintLines(HintStat stat, oCNpc& hero, bool russian, bool odyssee,
-                                   bool standardTraining) {
-    std::vector<std::string> lines;
-    const auto label = [russian](const wchar_t* ru, const char* en) { return MenuText(russian, ru, en); };
-    const auto add = [&](const wchar_t* ru, const char* en, int value, std::string suffix = {}) {
-        lines.push_back(label(ru, en) + "  " + std::to_string(value) + suffix);
+std::optional<std::string> NextOdysseeTalent(oCNpc& hero, bool strength, bool russian) {
+    const auto difficulty = ScriptInt("DIFFICULTYINT");
+    if (!difficulty || *difficulty < 0 || *difficulty > 2) return std::nullopt;
+
+    struct Talent {
+        const char* flag;
+        const wchar_t* russianName;
+        const char* englishName;
+        int threshold;
     };
-    const auto lp = label(L" ОО", " LP");
-    const auto addTraining = [&](int learned, int total) {
-        const int rate = LessonRate(learned);
-        if (rate < 5) {
-            add(L"До подорожания", "Until the price increases", rate * 30 - learned);
-            lines.push_back(label(L"Цена за +1  ", "Cost per +1  ") + std::to_string(rate)
-                            + " -> " + std::to_string(rate + 1) + lp);
-        } else {
-            lines.push_back(label(L"Достигнут последний порог", "Highest price tier reached"));
-            add(L"Цена за +1", "Cost per +1", rate, lp);
-        }
-        lines.push_back(label(L"Изучено  ", "Trained  ") + std::to_string(learned)
-                        + label(L"   Всего  ", "   Total  ") + std::to_string(total));
+    constexpr std::array melee{
+        Talent{"STARKERSCHWERTKAEMPFERGELERNT", L"Сильный боец меча", "Strong Swordsman", 70},
+        Talent{"SCHWERTMEISTERGELERNT", L"Мастер меча", "Sword Master", 90},
+        Talent{"ORKTOETERGELERNT", L"Убийца орков", "Orc Slayer", 120},
+    };
+    constexpr std::array ranged{
+        Talent{"WILDJAEGERGELERNT", L"Дикий охотник", "Wild Hunter", 70},
+        Talent{"MEISTERSCHUETZEGELERNT", L"Мастер стрельбы", "Master Marksman", 90},
+        Talent{"ORKJAEGERGELERNT", L"Охотник на орков", "Orc Hunter", 120},
     };
 
-    switch (stat) {
-    case HintStat::Strength:
-        if (standardTraining) {
-            addTraining(hero.aiscriptvars[81], hero.GetAttribute(NPC_ATR_STRENGTH));
-        } else if (odyssee) {
-            lines.push_back(label(L"Обычный арбалет  +", "Standard crossbow  +")
-                + std::to_string(hero.GetAttribute(NPC_ATR_STRENGTH))
-                + label(L" урона до защиты", " damage before armor"));
+    for (const auto& talent : strength ? melee : ranged) {
+        const auto learned = ScriptInt(talent.flag);
+        if (!learned) return std::nullopt;
+        if (*learned != 0) continue;
+        const int missing = talent.threshold - hero.GetAttribute(strength ? NPC_ATR_STRENGTH : NPC_ATR_DEXTERITY);
+        auto text = MenuText(russian, talent.russianName, talent.englishName);
+        if (missing <= 0) return text + MenuText(russian, L"  стат набран", "  stat met");
+        const auto stat = strength ? MenuText(russian, L" силы", " strength")
+                                   : MenuText(russian, L" ловкости", " dexterity");
+        return text + MenuText(russian, L"  еще ", "  need ") + std::to_string(missing) + stat;
+    }
+    return std::nullopt;
+}
+
+std::vector<std::string> HintLines(Hint hint, oCNpc& hero, bool russian) {
+    std::vector<std::string> lines;
+    const auto label = [russian](const wchar_t* ru, const char* en) { return MenuText(russian, ru, en); };
+    const auto add = [&](const wchar_t* ru, const char* en, auto value, std::string suffix = {}) {
+        lines.push_back(label(ru, en) + "  " + std::to_string(value) + suffix);
+    };
+
+    switch (hint.stat) {
+    case HintStat::Training: {
+        // A +5 lesson uses the tier at the start of the lesson.
+        const int learned = hero.aiscriptvars[hint.counter];
+        constexpr std::array thresholds{30, 60, 90, 120};
+        const auto next = std::ranges::upper_bound(thresholds, learned);
+        if (next == thresholds.end()) {
+            lines.push_back(label(L"Дальше цена не растет", "No further price increases"));
         } else {
-            add(L"Полный удар (штатно)", "Full hit (stock)",
-                hero.GetAttribute(NPC_ATR_STRENGTH), label(L" урона от силы", " damage from strength"));
+            const int remaining = *next - learned;
+            add(L"До подорожания", "Until the price increases", remaining);
+            if (remaining == 1) {
+                lines.push_back(label(L"Бери +5 сейчас", "Take +5 now"));
+            } else {
+                add(L"До выгодного +5", "Until the best +5 timing", remaining - 1);
+            }
         }
-        break;
-    case HintStat::Dexterity: {
-        const int dex = hero.GetAttribute(NPC_ATR_DEXTERITY);
-        if (standardTraining) {
-            addTraining(hero.aiscriptvars[82], dex);
-            break;
-        }
-        add(odyssee ? L"Поломка отмычки при ошибке" : L"Поломка отмычки (штатно)",
-            odyssee ? "Lockpick breaks on error" : "Lockpick break (stock)",
-            100 - std::clamp(dex, 0, 100), "%");
-        if (odyssee) {
-            constexpr std::array thresholds{60, 130, 200, 250};
-            for (int i = 3; i >= 0; --i) {
-                const std::string flag = "TALENT_SCHLOESSERKNACKEN" + std::to_string(i + 2);
-                if (ScriptInt(flag.c_str()) != 1) continue;
-                const int missing = thresholds[i] - dex;
-                lines.push_back(label(L"Замки ", "Locks ") + std::to_string(i + 2) +
-                    (missing <= 0 ? label(L" уровня  ловкости хватает", "  dexterity met") :
-                        label(L" уровня  еще ", "  need ") + std::to_string(missing) +
-                        label(L" ловкости", " dexterity")));
-                break;
+        if (hint.counter == 81 || hint.counter == 82) {
+            if (auto talent = NextOdysseeTalent(hero, hint.counter == 81, russian)) {
+                lines.push_back(std::move(*talent));
             }
         }
         break;
     }
-    case HintStat::OneHand:
-    case HintStat::TwoHand: {
-        const bool oneHand = stat == HintStat::OneHand;
-        const int skill = std::clamp(hero.GetHitChance(oneHand ? NPC_HITCHANCE_1H : NPC_HITCHANCE_2H), 0, 100);
-        add(odyssee ? L"Шанс полного удара" : L"Полный удар (штатно)",
-            odyssee ? "Full hit chance" : "Full hit (stock)", skill, "%");
-        if (odyssee && skill < 60) {
-            const int remaining = (skill < 30 ? 30 : 60) - skill;
-            add(skill < 30 ? L"До бойца" : L"До мастера", skill < 30 ? "To Fighter" : "To Master",
-                remaining, label(L" п. п.", " pp"));
-            if (standardTraining) {
-                const int learned = hero.aiscriptvars[oneHand ? 84 : 85];
-                int cost = 0;
-                for (int i = 0; i < remaining; ++i) cost += LessonRate(learned + i);
-                add(L"Цена при уроках +1", "Cost with +1 lessons", cost, lp);
+    case HintStat::Experience:
+        if (hero.experience_points_next_level > 0) {
+            const auto remaining = hero.experience_points_next_level -
+                (std::min)(hero.experience_points, hero.experience_points_next_level);
+            add(L"До следующего уровня", "To next level", remaining, label(L" опыта", " XP"));
+        }
+        break;
+    case HintStat::MagicKnowledge:
+        if (const auto knowledge = ScriptInt("WISSENLP")) {
+            lines.push_back(label(L"Бонус к урону до защиты", "Bonus damage before armor"));
+            lines.push_back(label(L"Ледяная стрела  +", "Ice Bolt  +") + std::to_string(*knowledge / 4));
+            lines.push_back(label(L"Удар молнии  +", "Lightning  +") + std::to_string(*knowledge / 2));
+        }
+        break;
+    case HintStat::Lockpicking: {
+        const int dex = hero.GetAttribute(NPC_ATR_DEXTERITY);
+        add(L"Поломка отмычки при ошибке", "Lockpick breaks on error", 100 - std::clamp(dex, 0, 100), "%");
+        constexpr std::array thresholds{60, 130, 200, 250};
+        for (int i = 3; i >= 0; --i) {
+            const std::string flag = "TALENT_SCHLOESSERKNACKEN" + std::to_string(i + 2);
+            if (ScriptInt(flag.c_str()) != 1) continue;
+            const int missing = thresholds[i] - dex;
+            if (missing > 0) {
+                lines.push_back(label(L"До замков ", "Locks ") + std::to_string(i + 2) +
+                    label(L" уровня  еще ", "  need ") + std::to_string(missing) +
+                    label(L" ловкости", " dexterity"));
             }
+            break;
         }
         break;
     }
@@ -261,7 +289,7 @@ class StatsPanel : public zCView {
 
     struct HintRow {
         Box bounds;
-        HintStat stat;
+        Hint hint;
         const Cell* title;
     };
     std::vector<HintRow> hintRows;
@@ -335,9 +363,9 @@ class StatsPanel : public zCView {
                 Text(valueX, y, row[row.size() - 1 - j]->text, valueWidths[j], ValueInk, true);
                 valueX -= valueWidths[j] + gutter;
             }
-            if (const auto stat = StatForHint(row.front()->id, odyssee)) {
+            if (const auto hint = StatForHint(row.front()->id, odyssee, standardTraining)) {
                 hintRows.push_back({{box.left, y, box.right, (std::min)(box.bottom, y + line)},
-                                    *stat, row.front()});
+                                    *hint, row.front()});
             }
             Text(box.left, y, row.front()->text, valueX - box.left,
                  row.front()->heading ? BronzeInk : TextInk);
@@ -405,7 +433,7 @@ class StatsPanel : public zCView {
     }
 
     void BuildHint(const HintRow& row, oCNpc& hero) {
-        const auto details = HintLines(row.stat, hero, hasCyrillicFont, odyssee, standardTraining);
+        const auto details = HintLines(row.hint, hero, hasCyrillicFont);
         if (details.empty() || !solid.backTex) return;
         const int padding = (std::max)(8, CharStats::PanelMargin(screen->psizey) / 2);
         const int line = CharStats::LineHeight(GetFont()->GetFontY());
@@ -461,7 +489,8 @@ public:
         odyssee = paged && ScriptInt("REAL_STRENGTH") == 81 && ScriptInt("REAL_DEXTERITY") == 82
             && ScriptInt("REAL_TALENT_1H") == 84 && ScriptInt("REAL_TALENT_2H") == 85
             && ScriptInt("TALENT_SCHLOESSERKNACKEN3").has_value();
-        standardTraining = odyssee && ScriptInt("ODY_CHECKSNCMODE_ENABLE") == 0;
+        standardTraining = odyssee && ScriptInt("ODY_CHECKSNCMODE_ENABLE") == 0
+            && ScriptInt("REAL_TALENT_BOW") == 86 && ScriptInt("REAL_TALENT_CROSSBOW") == 87;
         if (standardTraining && oCNpc::player) {
             for (auto& page : pages) RestoreTrainingColumns(page, *oCNpc::player);
         }
