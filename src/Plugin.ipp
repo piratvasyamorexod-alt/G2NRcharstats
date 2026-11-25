@@ -294,7 +294,6 @@ class StatsPanel : public zCView {
     };
     std::vector<HintRow> hintRows;
     const HintRow* hovered = nullptr;
-    DWORD hoverStarted = 0;
     bool hintPrepared = false;
     Box hintBox;
 
@@ -601,13 +600,10 @@ public:
             ClearHover();
             return;
         }
-        const DWORD now = GetTickCount();
         if (&*hit != hovered) {
             ClearHover();
             hovered = &*hit;
-            hoverStarted = now;
         }
-        if (now - hoverStarted < 350) return;
         if (!std::exchange(hintPrepared, true)) BuildHint(*hovered, *oCNpc::player);
         if (hintBox.Width() <= 0) return;
 
