@@ -294,25 +294,28 @@ class StatsPanel : public zCView {
         return GetFont()->GetFontX(zSTRING(text.c_str()));
     }
 
-    void Text(int x, int y, const std::string& source, int limit,
-              unsigned long ink, bool alignRight = false) {
+    int Text(int x, int y, const std::string& source, int limit,
+             unsigned long ink, bool alignRight = false) {
         std::string text = source;
         if (hasCyrillicFont) {
             std::replace(text.begin(), text.end(), '\xA8', '\xC5');
             std::replace(text.begin(), text.end(), '\xB8', '\xE5');
         }
-        if (Width(text) > limit) {
+        int width = Width(text);
+        if (width > limit) {
             const int dots = Width("...");
-            if (dots >= limit) return;
+            if (dots >= limit) return 0;
             while (!text.empty() && Width(text) + dots > limit) text.pop_back();
             text += "...";
+            width = Width(text);
         }
-        if (alignRight) x -= Width(text);
+        if (alignRight) x -= width;
         const zSTRING line(text.c_str());
         auto color = Ink(ink);
         auto shadow = Ink(0xFF0A0907);
         CreateText(anx(x - bounds.left), any(y - bounds.top), line, 0.0f, color, FALSE, TRUE);
         CreateText(anx(x - bounds.left + 1), any(y - bounds.top + 1), line, 0.0f, shadow, FALSE, TRUE);
+        return width;
     }
 
     void PaintPane(const Pane& pane, int index, Box box, int line, int gutter) {
@@ -344,6 +347,7 @@ class StatsPanel : public zCView {
             for (int& width : valueWidths) width = (std::max)(1, width * available / totalWidth);
         }
 
+        const int labelHeight = (std::min)(line, GetFont()->GetFontY());
         for (int i = first[index]; i < rows && i < first[index] + visible; ++i) {
             const auto& row = pane.rows[i];
             const int y = box.top + (i - first[index]) * line;
@@ -355,12 +359,14 @@ class StatsPanel : public zCView {
                 Text(valueX, y, row[row.size() - 1 - j]->text, valueWidths[j], ValueInk, true);
                 valueX -= valueWidths[j] + gutter;
             }
-            if (const auto hint = StatForHint(row.front()->id, odyssee, standardTraining)) {
-                hintRows.push_back({{box.left, y, box.right, (std::min)(box.bottom, y + line)},
-                                    *hint, row.front()});
+            const auto* label = row.front();
+            const int labelWidth = Text(box.left, y, label->text, valueX - box.left,
+                                        label->heading ? BronzeInk : TextInk);
+            if (labelWidth <= 0) continue;
+            if (const auto hint = StatForHint(label->id, odyssee, standardTraining)) {
+                hintRows.push_back({{box.left, y, box.left + labelWidth, (std::min)(box.bottom, y + labelHeight)},
+                                    *hint, label});
             }
-            Text(box.left, y, row.front()->text, valueX - box.left,
-                 row.front()->heading ? BronzeInk : TextInk);
         }
     }
 
