@@ -196,20 +196,13 @@ std::vector<std::string> HintLines(Hint hint, oCNpc& hero, bool russian) {
 
     switch (hint.stat) {
     case HintStat::Training: {
-        // A +5 lesson uses the tier at the start of the lesson.
         const int learned = hero.aiscriptvars[hint.counter];
         constexpr std::array thresholds{30, 60, 90, 120};
         const auto next = std::ranges::upper_bound(thresholds, learned);
         if (next == thresholds.end()) {
             lines.push_back(label(L"Дальше цена не растет", "No further price increases"));
         } else {
-            const int remaining = *next - learned;
-            add(L"До подорожания", "Until the price increases", remaining);
-            if (remaining == 1) {
-                lines.push_back(label(L"Бери +5 сейчас", "Take +5 now"));
-            } else {
-                add(L"До выгодного +5", "Until the best +5 timing", remaining - 1);
-            }
+            add(L"До подорожания", "Until the price increases", *next - learned);
         }
         if (hint.counter == 81 || hint.counter == 82) {
             if (auto talent = NextOdysseeTalent(hero, hint.counter == 81, russian)) {
